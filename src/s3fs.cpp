@@ -18,6 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#include <iostream>
 #include <cstdio>
 #include <cstdlib>
 #include <errno.h>
@@ -26,6 +27,7 @@
 #include <sys/types.h>
 #include <getopt.h>
 
+#include "rc4.cpp"
 #include "common.h"
 #include "s3fs.h"
 #include "s3fs_logger.h"
@@ -101,6 +103,7 @@ static off_t fake_diskfree_size   = -1; // default is not set(-1)
 static int max_thread_count       = 5;  // default is 5
 static bool update_parent_dir_stat= false;  // default not updating parent directory stats
 static fsblkcnt_t bucket_size;       // advertised size of the bucket
+static std::string encryption_key;
 
 //-------------------------------------------------------------------
 // Global functions : prototype
@@ -2765,6 +2768,18 @@ static int s3fs_read(const char* _path, char* buf, size_t size, off_t offset, st
         S3FS_PRN_WARN("failed to read file(%s). result=%zd", path, res);
     }
 
+    RC4 rc4;
+    char resBuf[256000];
+    for (int i = offset; i < (int) res; i += 4096)
+    {
+        int blobSize = std::min(4096, (int) res - i);
+        char blobBuf[blobSize];
+        rc4.set_key((unsigned char*) encryption_key.c_str(), encryption_key.length());
+        rc4.encrypt(buf + i, blobBuf, blobSize);
+        strcat(resBuf, blobBuf);
+    }
+    strcpy(buf, resBuf);
+
     return static_cast<int>(res);
 }
 
@@ -2772,6 +2787,11 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
 {
     WTF8_ENCODE(path)
     ssize_t res;
+
+    RC4 rc4;
+    char tmpBuf[size];
+    rc4.set_key((unsigned char*) encryption_key.c_str(), encryption_key.length());
+    rc4.encrypt((char *)buf, tmpBuf, size);
 
     S3FS_PRN_DBG("[path=%s][size=%zu][offset=%lld][pseudo_fd=%llu]", path, size, static_cast<long long int>(offset), (unsigned long long)(fi->fh));
 
@@ -2782,7 +2802,7 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
         return -EIO;
     }
 
-    if(0 > (res = ent->Write(static_cast<int>(fi->fh), buf, offset, size))){
+    if(0 > (res = ent->Write(static_cast<int>(fi->fh), (const char*)tmpBuf, offset, size))){
         S3FS_PRN_WARN("failed to write file(%s). result=%zd", path, res);
     }
 
@@ -4598,10 +4618,11 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
             return 1;
         }
 
-        // Unknown option
         if(NO_UTILITY_MODE == utility_mode){
-            S3FS_PRN_EXIT("specified unknown third option(%s).", arg);
+            encryption_key = arg;
+            return 0;
         }else{
+        // Unknown option
             S3FS_PRN_EXIT("specified unknown second option(%s). you don't need to specify second option(mountpoint) for utility mode(-u).", arg);
         }
         return -1;
